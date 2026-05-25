@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentEventHub, createBridgeServer, createDefaultResourceOperations, createEditTool, createFetchDataTool, createLoadResourceTool, createNodeFileOperations, createReadTool, createWriteTool, JsonlSessionTree, ToolRegistry, WebSocketClient } from "../src/index.js";
+import { AgentEventHub, createBridgeServer, createDefaultResourceOperations, createEditTool, createFetchDataTool, createLoadResourceTool, createNodeFileOperations, createReadTool, createTushareOperations, createWriteTool, JsonlSessionTree, ToolRegistry, WebSocketClient } from "../src/index.js";
 
 test("read/edit/write tools support pagination, exact replacement, parent mkdir", async () => {
   const dir = await mkdtemp(join(tmpdir(), "agent-files-"));
@@ -47,6 +47,34 @@ test("fetch_data uses replaceable provider operations and offset truncation", as
   const result = await registry.execute({ id: "f", name: "fetch_data", arguments: { symbol: "A", start_date: "20240101", end_date: "20240102", fields: ["close"], limit: 2 } });
   assert.equal(result.result?.details && (result.result.details as any).truncated, true);
   assert.match(result.result?.content[0]?.type === "text" ? result.result.content[0].text : "", /offset=2/);
+});
+
+test("Tushare operations use stk_mins for minute bars", async () => {
+  let requestBody: any;
+  const operations = createTushareOperations("test-token", async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({
+      code: 0,
+      data: {
+        fields: ["ts_code", "trade_time", "open", "close"],
+        items: [["600519.SH", "20240524093000", 1, 2]],
+      },
+    }));
+  });
+
+  const rows = await operations.fetchMinuteBars({
+    symbol: "600519.SH",
+    start_date: "20240520",
+    end_date: "20240524",
+    data_source: "tushare",
+    freq: "1min",
+    offset: 0,
+    limit: 200,
+  });
+
+  assert.equal(requestBody.api_name, "stk_mins");
+  assert.equal(requestBody.params.freq, "1min");
+  assert.deepEqual(rows, [{ ts_code: "600519.SH", trade_time: "20240524093000", open: 1, close: 2 }]);
 });
 
 test("load_resource returns metadata and preview for files", async () => {
