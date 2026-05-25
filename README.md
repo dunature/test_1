@@ -8,7 +8,7 @@ Quant Agent 是一个在网页端运行的 AI 智能体，专为量化策略研�
 
 **目标用户**：专业量化研究员，熟悉 Python 和量化策略开发流程。
 
-**当前状态**：Phase 1 + Demo 增强已完成，支持双均线策略端到端演示。Phase 2（完整回测引擎 + 权限系统 + 压缩恢复）规划中。
+**当前状态**：Phase 1 + Demo 增强代码层已完成（26/26 测试全绿，PR #1 + PR #2）。D1/D2 部署和 D6 真实数据端到端验收进行中。Phase 2 规划中。
 
 ---
 
@@ -82,7 +82,9 @@ Quant Agent 采用三层架构，设计理念参考 Pi（最小可控内核）�
 - [x] rqalpha 策略模板（双均线 10min/30min 交叉）
 - [x] Docker sandbox 回测执行（5s 超时、256MB 内存、无网络隔离）
 - [x] Web UI 回测面板（权益曲线 + 指标表格 + WebSocket 重连）
-- [x] PR #1 和 PR #2 通过代码评审和 QA 验收（26/26 测试全绿）
+- [x] PR #1 和 PR #2 代码层评审+QA 通过（26/26 测试全绿）
+- [ ] D6 E2E：真实 Tushare token 注入后 600519 端到端（待 token 安全注入）
+- [ ] D6 压测：50 并发 + WebSocket 断连恢复（待 D1/D2 部署环境）
 
 ### 🔜 Phase 2a — 回测 + 基础安全（规划中）
 - [ ] 完整 rqalpha 回测引擎集成（Mod 插件化）
@@ -140,105 +142,70 @@ export TUSHARE_TOKEN="xxx"
 # 3. 运行测试
 npm test -- --runInBand
 
-# 4. 启动开发服务器
-npm run dev
+# 4. 构建并启动
+npm run build && npm start
 ```
 
 ### Docker 部署（50 用户）
 
-#### 构建
+D1/D2/P2A-1 当前交付物在仓库根目录：
+
+| 文件 | 用途 |
+|------|------|
+| `Dockerfile` | 构建 agent-core 运行镜像，内置 PM2 runtime |
+| `docker-compose.yml` | 编排 `agent` + `nginx`，挂载 `/var/run/docker.sock` 给 sandbox 回测容器 |
+| `ecosystem.config.cjs` | PM2 cluster 配置，默认 `instances=max`，崩溃自动重启 |
+| `nginx.conf` | nginx 反向代理，`/ws` 支持 WebSocket upgrade，`/healthz` 转发健康检查 |
+| `scripts/ws-load-test.mjs` | 50 并发 WebSocket 在线/断连率压测入口 |
+| `agent-core/src/sandbox/manager.ts` | 多用户 Docker sandbox manager，负责资源池、用户数据隔离、生命周期清理 |
+
+#### 环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `DEEPSEEK_API_KEY` | 是 | — | DeepSeek API Key，仅服务端注入 |
+| `TUSHARE_TOKEN` | 是 | — | Tushare Token，仅服务端注入 |
+| `HTTP_PORT` | 否 | `80` | nginx 对外端口 |
+| `WEB_CONCURRENCY` | 否 | `max` | PM2 cluster 实例数 |
+| `PM2_MAX_MEMORY_RESTART` | 否 | `512M` | 单进程内存重启阈值 |
+| `AGENT_DATA_DIR` | 否 | `/data` | session / 数据持久化目录 |
+| `RQALPHA_IMAGE` | 否 | `quant-agent-rqalpha:latest` | sandbox 回测镜像名 |
+| `SANDBOX_MAX_CONCURRENT` | 否 | `8` | sandbox 资源池最大并发容器数 |
+| `SANDBOX_MEMORY_MB` | 否 | `256` | 单 sandbox 容器内存限制 |
+| `SANDBOX_CPUS` | 否 | `1` | 单 sandbox 容器 CPU 限制 |
+| `SANDBOX_TIMEOUT_SECONDS` | 否 | `5` | 单 sandbox 运行超时 |
+
+#### 本地构建与启动
 
 ```bash
-# 构建 agent-core 镜像
-cd agent-core
-docker build -t quant-agent .
+# 在仓库根目录执行
+export DEEPSEEK_API_KEY="sk-xxx"
+export TUSHARE_TOKEN="xxx"
+docker build -t quant-agent-rqalpha:latest agent-core/sandbox/rqalpha
+docker compose up --build -d
 
-# 构建 sandbox 回测镜像
-cd sandbox/rqalpha
-docker build -t quant-agent-sandbox .
+# 健康检查：返回 200 + status + uptime_seconds
+curl -fsS http://127.0.0.1:${HTTP_PORT:-80}/healthz
 ```
 
-#### PM2 集群配置（ecosystem.config.js）
+#### 日志与配置路径
 
-```js
-module.exports = {
-  apps: [{
-    name: 'quant-agent',
-    script: 'dist/index.js',
-    instances: 'max',        // CPU 核数
-    exec_mode: 'cluster',
-    env: {
-      PORT: 3000,
-      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
-      TUSHARE_TOKEN: process.env.TUSHARE_TOKEN,
-    },
-    max_memory_restart: '512M',
-    error_file: '/var/log/quant-agent/err.log',
-    out_file: '/var/log/quant-agent/out.log',
-    kill_timeout: 5000,
-  }]
-};
+| 项 | 路径 |
+|----|------|
+| PM2 配置 | `/app/ecosystem.config.cjs`（镜像内），仓库根目录 `ecosystem.config.cjs` |
+| nginx 配置 | `/etc/nginx/conf.d/default.conf`（容器内），仓库根目录 `nginx.conf` |
+| 应用 stdout | `/var/log/quant-agent/out.log`（`agent_logs` volume） |
+| 应用 stderr | `/var/log/quant-agent/err.log`（`agent_logs` volume） |
+| 持久化数据 | `/data`（`agent_data` volume） |
+
+#### 50 并发压测
+
+```bash
+# 默认 50 并发、30s、断连率阈值 <1%
+node scripts/ws-load-test.mjs ws://127.0.0.1:${HTTP_PORT:-80}/ws 50 30000
 ```
 
-#### nginx 反向代理（nginx.conf）
-
-```nginx
-upstream quant_agent {
-    ip_hash;  # WebSocket 会话保持
-    server 127.0.0.1:3000;
-}
-
-server {
-    listen 80;
-    server_name agent.example.com;
-
-    # WebSocket 升级
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_http_version 1.1;
-    proxy_read_timeout 65s;  # 略大于外部链路 60s 超时
-
-    location / {
-        proxy_pass http://quant_agent;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # 静态文件直接服务
-    location /public/ {
-        alias /app/public/;
-    }
-}
-```
-
-#### docker-compose.yml
-
-```yaml
-version: '3.8'
-services:
-  agent:
-    build: ./agent-core
-    environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - TUSHARE_TOKEN=${TUSHARE_TOKEN}
-    volumes:
-      - agent_data:/data
-      - /var/run/docker.sock:/var/run/docker.sock  # sandbox 容器管理
-    restart: always
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
-    depends_on:
-      - agent
-    restart: always
-
-volumes:
-  agent_data:
-```
+验收阈值：50 个 WebSocket 同时在线，断连率 `<1%`；进程崩溃后由 PM2/Compose 在 30s 内拉起，`/healthz` 恢复 200。
 
 ---
 
@@ -263,13 +230,16 @@ volumes:
 
 ## 验收标准
 
-Demo 交付验收需满足以下 5 条：
+Demo 交付验收（6 条唯一标准）：
 
 1. **端到端链路**：双均线策略从用户输入到回测结果展示全流程跑通，使用 Tushare 真实 A 股数据
-2. **并发隔离**：50 用户同时使用，session 数据互不穿透，WebSocket 不断流
-3. **故障恢复**：进程崩溃后 PM2 自动重启，session 状态可恢复
+2. **并发隔离**：50 并发 session 跑 5 分钟，session 数据互不穿透，错误率 <1%
+3. **故障恢复**：kill 进程后 30s 内自动恢复，断连自动恢复成功率 ≥95%
 4. **凭据安全**：DeepSeek Key / Tushare Token 不进前端代码、日志输出、PR 描述
 5. **错误处理**：外部请求 60s 超时 + sandbox 5s 硬超时，超时返回明确错误提示
+6. **响应延迟**：P95 交互延迟 <2s
+
+> **注意**：24h 零断流、5s 内恢复等为上线前稳定性测试标准，不列入 Demo 验收。
 
 ---
 
@@ -298,23 +268,20 @@ Demo 交付验收需满足以下 5 条：
 
 ## API 参考
 
-### WebSocket 端点
+### WebSocket
 
-| 端点 | 方向 | 说明 |
-|------|------|------|
-| `ws://host/ws` | client→server | 用户消息、/tree、/fork、/clone 命令 |
-| `ws://host/ws` | server→client | agent_start/end, turn_start/end, message_delta, tool_execution_start/update/end |
+WebSocket 通过 `/ws` 建立；为兼容旧 Demo，根路径 Upgrade 仍接受，但部署与前端统一使用 `/ws`。
 
-### WebSocket 入站帧（client→server）
+**入站帧（client→server）**
 
 ```json
 {"type": "message", "text": "写一个双均线策略，用 600519 分钟数据"}
-{"type": "tree", "action": "jump", "entryId": "abc123"}
-{"type": "fork"}
-{"type": "clone"}
+{"type": "tree", "sessionId": "s1", "leafId": "abc123"}
+{"type": "fork", "sessionId": "s1", "entryId": "abc123"}
+{"type": "clone", "sessionId": "s1"}
 ```
 
-### WebSocket 出站事件（server→client）
+**出站事件（server→client）**
 
 ```json
 {"type": "turn_start", "sessionId": "s1"}
@@ -326,12 +293,8 @@ Demo 交付验收需满足以下 5 条：
 {"type": "turn_end", "tokens": 12345}
 ```
 
-### Session API（HTTP）
+### Health Check
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/session` | 创建新 session |
-| GET | `/api/session/:id` | 获取 session 信息 |
-| POST | `/api/session/:id/tree` | 移动 leaf 到指定 entry |
-| POST | `/api/session/:id/fork` | 从当前 session fork |
-| POST | `/api/session/:id/clone` | 克隆当前 active branch |
+| 端点 | 说明 |
+|------|------|
+| `GET /healthz` | 返回 `200` + `status` + `uptime_seconds` + `active_ws_clients` + `attached_sessions` |

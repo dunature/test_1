@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentEventHub, createBridgeServer, createDefaultResourceOperations, createEditTool, createFetchDataTool, createLoadResourceTool, createNodeFileOperations, createReadTool, createTushareOperations, createWriteTool, JsonlSessionTree, ToolRegistry, WebSocketClient } from "../src/index.js";
+import { AgentEventHub, AgentSession, createBridgeServer, createDefaultResourceOperations, createEditTool, createFetchDataTool, createLoadResourceTool, createNodeFileOperations, createReadTool, createTushareOperations, createWriteTool, JsonlSessionTree, ToolRegistry, WebSocketClient } from "../src/index.js";
 
 test("read/edit/write tools support pagination, exact replacement, parent mkdir", async () => {
   const dir = await mkdtemp(join(tmpdir(), "agent-files-"));
@@ -122,6 +122,22 @@ test("createBridgeServer serves UI and accepts AgentEventHub construction", asyn
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+test("createBridgeServer exposes health check with uptime", async () => {
+  const hub = new AgentEventHub();
+  const server = createBridgeServer(hub, { staticDir: join(process.cwd(), "public"), startedAt: Date.now() - 1500 });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const address = server.address();
+  assert.ok(typeof address === "object" && address !== null);
+  const response = await fetch(`http://127.0.0.1:${address.port}/healthz`);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { status: string; uptime_seconds: number; active_ws_clients: number; attached_sessions: number };
+  assert.equal(body.status, "ok");
+  assert.equal(body.uptime_seconds >= 1, true);
+  assert.equal(body.active_ws_clients, 0);
+  assert.equal(body.attached_sessions, 0);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
 test("createBridgeServer rejects static path traversal", async () => {
   const dir = await mkdtemp(join(tmpdir(), "agent-static-"));
   try {
@@ -165,6 +181,23 @@ test("WebSocketClient encodes large outbound text frames with 64-bit length", ()
   assert.equal(frame[1], 127);
   assert.equal(Number(frame.readBigUInt64BE(2)), Buffer.byteLength(text));
   assert.equal(frame.subarray(10).toString("utf8"), text);
+});
+
+test("AgentEventHub creates one server-side session per WebSocket client", () => {
+  const hub = new AgentEventHub();
+  const a = new WebSocketClient(new FakeSocket() as any);
+  const b = new WebSocketClient(new FakeSocket() as any);
+  const makeSession = (client: WebSocketClient) => new AgentSession({ provider: {} as any, model: {} as any, auth: {}, sessionId: client.sessionId });
+
+  const a1 = hub.getOrCreateClientSession(a, makeSession);
+  const a2 = hub.getOrCreateClientSession(a, makeSession);
+  const b1 = hub.getOrCreateClientSession(b, makeSession);
+
+  assert.equal(a1, a2);
+  assert.notEqual(a1.sessionId, b1.sessionId);
+  assert.equal(a1.sessionId, a.sessionId);
+  assert.equal(b1.sessionId, b.sessionId);
+  assert.equal(hub.sessionCount(), 2);
 });
 
 function maskedClientTextFrame(text: string): Buffer {

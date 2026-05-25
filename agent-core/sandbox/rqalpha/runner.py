@@ -7,6 +7,7 @@ import os
 import runpy
 import traceback
 from datetime import datetime
+from quant_agent_mod import StrategyContext, register_default_mods
 
 
 def parse_date(value):
@@ -105,11 +106,19 @@ p.add_argument("--data", default="/data")
 args = p.parse_args()
 
 try:
-    # Validate strategy code loads, then execute the demo's real data path with
-    # an equivalent double-moving-average backtest over the mounted CSV bars.
+    adapter = register_default_mods()
+    context = StrategyContext(start_date=args.start, end_date=args.end, initial_cash=args.cash, benchmark=args.benchmark)
+    adapter.start(context)
+    with open(args.strategy, encoding="utf-8") as handle:
+        strategy_code = handle.read()
+    adapter.strategy_loaded(strategy_code)
     runpy.run_path(args.strategy, init_globals={"__name__": "__rqalpha_strategy__"})
     bars = [bar for bar in load_bars(args.data) if args.start <= bar["date"].strftime("%Y%m%d") <= args.end]
-    print(json.dumps(run_double_ma_backtest(bars, args.cash), ensure_ascii=False))
+    adapter.before_simulation(len(bars))
+    result = run_double_ma_backtest(bars, args.cash)
+    adapter.after_simulation(result)
+    result = adapter.after_analysis(result)
+    print(json.dumps(result, ensure_ascii=False))
 except Exception as e:
     print(json.dumps({"error": str(e), "traceback": traceback.format_exc()}, ensure_ascii=False))
     raise

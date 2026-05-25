@@ -14,9 +14,13 @@ const defaultMaxTextResultChars = 12_000;
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private readonly maxTextResultChars: number;
+  private readonly permission: import("../permissions/index.js").PermissionMiddleware | undefined;
+  private readonly permissionRole: import("../permissions/index.js").PermissionRole;
 
   constructor(options: ToolRegistryOptions = {}) {
     this.maxTextResultChars = options.maxTextResultChars ?? defaultMaxTextResultChars;
+    this.permission = options.permission;
+    this.permissionRole = options.permissionRole ?? "backtest";
   }
 
   register<TParams, TDetails, TOperations>(definition: AgentTool<TParams, TDetails, TOperations>): RegisteredTool<TParams, TDetails, TOperations> {
@@ -50,6 +54,12 @@ export class ToolRegistry {
     }
 
     try {
+      if (this.permission) {
+        const permission = await this.permission({ role: this.permissionRole, toolCall: call });
+        if (permission.mode !== "allow") {
+          return this.errorRecord(call, startedAt, permission.reason ?? `permission denied: ${call.name}`) as ToolExecutionRecord<TDetails>;
+        }
+      }
       const prepared = tool.prepareArguments ? tool.prepareArguments(call.arguments) : call.arguments;
       validateAgainstSchema(tool.parameters, prepared, tool.name);
       const ctx: any = { toolCallId: call.id, params: prepared };

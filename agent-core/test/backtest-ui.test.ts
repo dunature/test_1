@@ -28,6 +28,7 @@ test("web UI includes backtest canvas, metrics table and reconnect logic", async
   assert.match(html, /<canvas id="equity"/);
   assert.match(html, /<table id="metrics"/);
   assert.match(js, /setTimeout\(connect,1000\)/);
+  assert.match(js, /\/ws/);
   assert.match(js, /renderBacktest/);
   assert.match(js, /drawEquity/);
 });
@@ -74,4 +75,65 @@ test("backtest tool rejects user-supplied host data_path", async () => {
   });
   assert.equal(result.isError, true);
   assert.match(result.error ?? "", /unknown argument: data_path/);
+});
+
+test("backtest tool rejects caller-supplied user_id and injects server-side identity", async () => {
+  let capturedUserId: string | undefined;
+  const registry = new ToolRegistry();
+  registry.register(createBacktestTool({
+    async runBacktest(params) {
+      capturedUserId = params.user_id;
+      return {
+        equity_curve: [],
+        metrics: { sharpe: 0, max_drawdown: 0, win_rate: 0, annual_return: 0 },
+      };
+    },
+  }, { userId: "server-session" }));
+
+  const rejected = await registry.execute({
+    id: "b",
+    name: "backtest",
+    arguments: {
+      strategy_code: "def init(context): pass",
+      start_date: "20240101",
+      end_date: "20240102",
+      user_id: "victim",
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.error ?? "", /unknown argument: user_id/);
+
+  const accepted = await registry.execute({
+    id: "b",
+    name: "backtest",
+    arguments: {
+      strategy_code: "def init(context): pass",
+      start_date: "20240101",
+      end_date: "20240102",
+    },
+  });
+  assert.equal(accepted.isError, false);
+  assert.equal(capturedUserId, "server-session");
+});
+
+test("backtest tool supports dynamic server-side identity per session", async () => {
+  const captured: Array<string | undefined> = [];
+  let currentSessionId = "client-a";
+  const registry = new ToolRegistry();
+  registry.register(createBacktestTool({
+    async runBacktest(params) {
+      captured.push(params.user_id);
+      return {
+        equity_curve: [],
+        metrics: { sharpe: 0, max_drawdown: 0, win_rate: 0, annual_return: 0 },
+      };
+    },
+  }, { userId: () => currentSessionId }));
+
+  const args = { strategy_code: "def init(context): pass", start_date: "20240101", end_date: "20240102" };
+  await registry.execute({ id: "a", name: "backtest", arguments: args });
+  currentSessionId = "client-b";
+  await registry.execute({ id: "b", name: "backtest", arguments: args });
+
+  assert.deepEqual(captured, ["client-a", "client-b"]);
 });
