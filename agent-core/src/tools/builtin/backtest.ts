@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { safeResolve } from "../../safe-path.js";
 import { defineTool, type AgentTool } from "../index.js";
 
 export interface BacktestParams { strategy_code: string; start_date: string; end_date: string; initial_cash?: number; benchmark?: string; data_path?: string; timeout_seconds?: number }
@@ -11,9 +12,10 @@ export interface BacktestResult { equity_curve: EquityPoint[]; metrics: Backtest
 export interface BacktestDetails extends BacktestResult { engine: "rqalpha"; timeout_seconds: number; memory_mb: number; network: "none" }
 export interface BacktestOperations { runBacktest(params: Required<Omit<BacktestParams, "benchmark" | "data_path">> & Pick<BacktestParams, "benchmark" | "data_path">): Promise<BacktestResult> }
 
-export function createDockerRqalphaOperations(options: { image?: string; dataPath?: string; dockerBin?: string } = {}): BacktestOperations {
+export function createDockerRqalphaOperations(options: { image?: string; dataRoot?: string; dataPath?: string; dockerBin?: string } = {}): BacktestOperations {
   const image = options.image ?? "quant-agent-rqalpha:latest";
   const dockerBin = options.dockerBin ?? "docker";
+  const dataRoot = resolve(options.dataRoot ?? process.cwd());
   return { async runBacktest(params) {
     const workdir = await mkdtemp(join(tmpdir(), "rqalpha-backtest-"));
     try {
@@ -21,8 +23,8 @@ export function createDockerRqalphaOperations(options: { image?: string; dataPat
       await writeFile(strategyPath, params.strategy_code, "utf8");
       const args = ["run", "--rm", "--network", "none", "--memory", "256m", "--cpus", "1", "--read-only", "-v", `${strategyPath}:/workspace/strategy.py:ro`];
       const dataPath = params.data_path ?? options.dataPath;
-      if (dataPath) args.push("-v", `${resolve(dataPath)}:/data:ro`);
-      args.push(image, "python", "/runner.py", "--strategy", "/workspace/strategy.py", "--start", params.start_date, "--end", params.end_date, "--cash", String(params.initial_cash));
+      if (dataPath) args.push("-v", `${safeResolve(dataRoot, dataPath, "backtest data path")}:/data:ro`);
+      args.push(image, "python", "/runner.py", "--strategy", "/workspace/strategy.py", "--start", params.start_date, "--end", params.end_date, "--cash", String(params.initial_cash), "--data", "/data");
       if (params.benchmark) args.push("--benchmark", params.benchmark);
       const { stdout, stderr } = await runProcess(dockerBin, args, params.timeout_seconds * 1000);
       const parsed = JSON.parse(stdout) as BacktestResult;
@@ -35,11 +37,12 @@ export function createBacktestTool(operations: BacktestOperations): AgentTool<Ba
   return defineTool<BacktestParams, BacktestDetails, BacktestOperations>({
     name: "backtest",
     description: "Run an rqalpha strategy in a Docker sandbox and return structured equity curve plus metrics JSON.",
-    parameters: { type: "object", properties: { strategy_code: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" }, initial_cash: { type: "number" }, benchmark: { type: "string" }, data_path: { type: "string" }, timeout_seconds: { type: "integer" } }, required: ["strategy_code", "start_date", "end_date"], additionalProperties: false },
+    parameters: { type: "object", properties: { strategy_code: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" }, initial_cash: { type: "number" }, benchmark: { type: "string" }, timeout_seconds: { type: "integer" } }, required: ["strategy_code", "start_date", "end_date"], additionalProperties: false },
     operations,
     async execute({ params, operations }) {
-      const timeout_seconds = params.timeout_seconds ?? 60;
-      const result = await operations!.runBacktest({ ...params, initial_cash: params.initial_cash ?? 1_000_000, timeout_seconds });
+      const timeout_seconds = params.timeout_seconds ?? 5;
+      const { data_path: _ignored, ...safeParams } = params;
+      const result = await operations!.runBacktest({ ...safeParams, initial_cash: params.initial_cash ?? 1_000_000, timeout_seconds });
       const details: BacktestDetails = { ...result, engine: "rqalpha", timeout_seconds, memory_mb: 256, network: "none" };
       return { content: [{ type: "text", text: JSON.stringify({ equity_curve: result.equity_curve, metrics: result.metrics }, null, 2) }], details };
     },

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { createBacktestTool, ToolRegistry } from "../src/index.js";
+import { createBacktestTool, createDockerRqalphaOperations, ToolRegistry } from "../src/index.js";
 
 test("backtest tool returns structured equity curve and metrics from replaceable sandbox operations", async () => {
   const registry = new ToolRegistry();
   registry.register(createBacktestTool({
     async runBacktest(params) {
-      assert.equal(params.timeout_seconds, 60);
+      assert.equal(params.timeout_seconds, 5);
       return {
         equity_curve: [{ date: "2024-01-01", equity: 1000000 }, { date: "2024-01-02", equity: 1010000 }],
         metrics: { sharpe: 1.2, max_drawdown: -0.03, win_rate: 0.55, annual_return: 0.18 },
@@ -30,4 +30,48 @@ test("web UI includes backtest canvas, metrics table and reconnect logic", async
   assert.match(js, /setTimeout\(connect,1000\)/);
   assert.match(js, /renderBacktest/);
   assert.match(js, /drawEquity/);
+});
+
+test("rqalpha runner consumes mounted CSV data instead of synthetic results", async () => {
+  const runner = await readFile("sandbox/rqalpha/runner.py", "utf8");
+  assert.match(runner, /csv\.DictReader/);
+  assert.match(runner, /load_bars\(args\.data\)/);
+  assert.match(runner, /run_double_ma_backtest/);
+  assert.doesNotMatch(runner, /synthetic_result/);
+});
+
+test("docker rqalpha operations reject data paths outside configured data root", async () => {
+  const operations = createDockerRqalphaOperations({ dataRoot: "/workspace/data", dockerBin: "docker" });
+  await assert.rejects(
+    operations.runBacktest({
+      strategy_code: "def init(context): pass",
+      start_date: "20240101",
+      end_date: "20240102",
+      initial_cash: 1_000_000,
+      timeout_seconds: 5,
+      data_path: "../secret",
+    }),
+    /escapes root/,
+  );
+});
+
+test("backtest tool rejects user-supplied host data_path", async () => {
+  const registry = new ToolRegistry();
+  registry.register(createBacktestTool({
+    async runBacktest() {
+      throw new Error("should not execute with invalid schema");
+    },
+  }));
+  const result = await registry.execute({
+    id: "b",
+    name: "backtest",
+    arguments: {
+      strategy_code: "def init(context): pass",
+      start_date: "20240101",
+      end_date: "20240102",
+      data_path: "../secret",
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.error ?? "", /unknown argument: data_path/);
 });
