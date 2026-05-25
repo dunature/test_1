@@ -12,7 +12,7 @@ export function createTushareOperations(token = process.env.TUSHARE_TOKEN, fetch
       const response = await fetchImpl("http://api.tushare.pro", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ api_name: "pro_bar", token, params: { ts_code: params.symbol, start_date: params.start_date, end_date: params.end_date, freq: params.freq } }),
+        body: JSON.stringify({ api_name: "stk_mins", token, params: { ts_code: params.symbol, start_date: params.start_date, end_date: params.end_date, freq: params.freq } }),
       });
       if (!response.ok) throw new Error(`Tushare request failed: ${response.status}`);
       const json = await response.json() as any;

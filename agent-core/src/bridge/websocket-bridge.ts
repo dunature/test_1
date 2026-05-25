@@ -9,13 +9,30 @@ import { JsonlSessionTree } from "../session-tree/index.js";
 
 export interface SessionApi { create(): Promise<string>; tree(sessionId: string, leafId: string): Promise<void>; fork(sessionId: string, entryId: string): Promise<string>; clone(sessionId: string): Promise<string> }
 export interface ClientCommand { type: "message" | "tree" | "fork" | "clone"; text?: string; sessionId?: string; leafId?: string; entryId?: string }
-export interface BridgeOptions { staticDir?: string; sessionDir?: string; sessionApi?: SessionApi; onClientMessage?: (message: ClientCommand, client: WebSocketClient) => void | Promise<void> }
+export interface BridgeOptions { staticDir?: string; sessionDir?: string; sessionApi?: SessionApi; startedAt?: number; sessionFactory?: (client: WebSocketClient) => AgentSession; onClientMessage?: (message: ClientCommand, client: WebSocketClient) => void | Promise<void> }
 
 export class AgentEventHub {
   private clients = new Set<WebSocketClient>();
   private sessions = new Set<AgentSession>();
+  private clientSessions = new Map<WebSocketClient, AgentSession>();
   attach(session: AgentSession): void { this.sessions.add(session); session.subscribe((event) => this.broadcast(event)); }
-  add(client: WebSocketClient): void { this.clients.add(client); client.onClose = () => this.clients.delete(client); }
+  add(client: WebSocketClient): void {
+    this.clients.add(client);
+    client.addCloseListener(() => {
+      this.clients.delete(client);
+      this.clientSessions.delete(client);
+    });
+  }
+  clientCount(): number { return this.clients.size; }
+  sessionCount(): number { return this.sessions.size + this.clientSessions.size; }
+  getOrCreateClientSession(client: WebSocketClient, factory: (client: WebSocketClient) => AgentSession): AgentSession {
+    const existing = this.clientSessions.get(client);
+    if (existing) return existing;
+    const session = factory(client);
+    session.subscribe((event) => client.sendJson(event));
+    this.clientSessions.set(client, session);
+    return session;
+  }
   broadcast(event: AgentEvent): void { for (const client of this.clients) client.sendJson(event); }
   async runMessage(text: string): Promise<void> {
     const session = this.sessions.values().next().value;
@@ -25,13 +42,19 @@ export class AgentEventHub {
 }
 
 export class WebSocketClient {
+  readonly sessionId = crypto.randomUUID();
   onClose?: () => void;
   onMessage?: (text: string) => void | Promise<void>;
+  private closeListeners = new Set<() => void>();
   private buffer = Buffer.alloc(0);
   constructor(private readonly socket: Socket) {
-    socket.on("close", () => this.onClose?.());
+    socket.on("close", () => {
+      this.onClose?.();
+      for (const listener of this.closeListeners) listener();
+    });
     socket.on("data", (chunk) => this.readFrames(chunk));
   }
+  addCloseListener(listener: () => void): void { this.closeListeners.add(listener); }
   sendJson(value: unknown): void { this.sendText(JSON.stringify(value)); }
   sendText(text: string): void {
     const payload = Buffer.from(text);
@@ -90,8 +113,11 @@ function createTextFrameHeader(payloadLength: number): Buffer {
 
 export function createBridgeServer(hub: AgentEventHub, options: BridgeOptions = {}): Server {
   const staticDir = options.staticDir ?? join(process.cwd(), "public");
-  const server = createServer(async (req, res) => serveHttp(req, res, staticDir));
+  const startedAt = options.startedAt ?? Date.now();
+  const server = createServer(async (req, res) => serveHttp(req, res, staticDir, startedAt, hub));
   server.on("upgrade", (req, socket) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname !== "/" && url.pathname !== "/ws") return socket.destroy();
     if (req.headers.upgrade?.toLowerCase() !== "websocket") return socket.destroy();
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string") return socket.destroy();
@@ -113,9 +139,19 @@ export function createSessionApi(sessionDir: string): SessionApi {
   };
 }
 
-async function serveHttp(req: IncomingMessage, res: ServerResponse, staticDir: string): Promise<void> {
+async function serveHttp(req: IncomingMessage, res: ServerResponse, staticDir: string, startedAt: number, hub: AgentEventHub): Promise<void> {
   try {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/healthz") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({
+        status: "ok",
+        uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+        active_ws_clients: hub.clientCount(),
+        attached_sessions: hub.sessionCount(),
+      }));
+      return;
+    }
     const file = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
     const content = await readFile(safeResolve(staticDir, file, "static file"));
     res.writeHead(200, { "content-type": contentType(file) });
@@ -131,7 +167,13 @@ async function handleClientMessage(hub: AgentEventHub, options: BridgeOptions, c
     if (message.type === "message") {
       const text = message.text?.trim();
       if (!text) throw new Error("message text is required");
-      await (options.onClientMessage ? options.onClientMessage(message, client) : hub.runMessage(text));
+      if (options.onClientMessage) {
+        await options.onClientMessage(message, client);
+      } else if (options.sessionFactory) {
+        await hub.getOrCreateClientSession(client, options.sessionFactory).run(text);
+      } else {
+        await hub.runMessage(text);
+      }
       return;
     }
     if (message.type === "tree") {

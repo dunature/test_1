@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "tsx src/server.ts",
+    "start": "node dist/src/server.js",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc",
     "test": "node --test --import tsx test/*.test.ts"
   },
   "devDependencies": {

@@ -90,4 +90,6 @@ export type JsonSchema = {
 
 export interface ToolRegistryOptions {
   maxTextResultChars?: number;
+  permission?: import("../permissions/index.js").PermissionMiddleware;
+  permissionRole?: import("../permissions/index.js").PermissionRole;
 }

@@ -1,0 +1,28 @@
+module.exports = {
+  apps: [{
+    name: "quant-agent",
+    cwd: "/app/agent-core",
+    script: "dist/src/server.js",
+    exec_mode: "cluster",
+    instances: process.env.WEB_CONCURRENCY || "max",
+    max_memory_restart: process.env.PM2_MAX_MEMORY_RESTART || "512M",
+    kill_timeout: 5000,
+    env: {
+      NODE_ENV: "production",
+      HOST: "0.0.0.0",
+      PORT: process.env.PORT || 3000,
+      STATIC_DIR: process.env.STATIC_DIR || "/app/agent-core/public",
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+      TUSHARE_TOKEN: process.env.TUSHARE_TOKEN,
+      AGENT_DATA_DIR: process.env.AGENT_DATA_DIR || "/data",
+      RQALPHA_IMAGE: process.env.RQALPHA_IMAGE || "quant-agent-rqalpha:latest",
+      SANDBOX_MAX_CONCURRENT: process.env.SANDBOX_MAX_CONCURRENT || "8",
+      SANDBOX_MEMORY_MB: process.env.SANDBOX_MEMORY_MB || "256",
+      SANDBOX_CPUS: process.env.SANDBOX_CPUS || "1",
+      SANDBOX_TIMEOUT_SECONDS: process.env.SANDBOX_TIMEOUT_SECONDS || "5",
+    },
+    error_file: process.env.PM2_ERROR_LOG || "/var/log/quant-agent/err.log",
+    out_file: process.env.PM2_OUT_LOG || "/var/log/quant-agent/out.log",
+    merge_logs: true,
+  }],
+};
